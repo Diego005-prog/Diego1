@@ -1,0 +1,17 @@
+{
+  "name": "Diego-1 · Fichaje",
+  "short_name": "Diego-1",
+  "start_url": "./",
+  "display": "standalone",
+  "background_color": "#f4f6f8",
+  "theme_color": "#111827",
+  "description": "Registro horario móvil de Diego-1, S.L.",
+  "icons": [
+    {
+      "src": "icons/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}
