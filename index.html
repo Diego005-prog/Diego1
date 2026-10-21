@@ -38,22 +38,23 @@ button:disabled{opacity:.55;cursor:not-allowed}
     <div id="clock" class="clock"></div>
     <div style="margin-top:10px"><span id="status" class="status">Sin identificar</span></div>
 
-    <label for="worker">Operario</label>
-    <input id="worker" type="text" autocomplete="name" maxlength="100" placeholder="Tu nombre y apellidos">
-
     <label for="pin">PIN personal</label>
-    <input id="pin" type="password" inputmode="numeric" autocomplete="current-password" maxlength="8" placeholder="PIN">
+    <input id="pin" type="password" inputmode="numeric" autocomplete="off" maxlength="8" placeholder="Introduce tu PIN asignado" aria-describedby="pinHelp">
+    <div id="pinHelp" class="small muted" style="margin-top:6px">Tu nombre aparecerá automáticamente al validar tu PIN.</div>
+    <button id="identify" class="secondary">Identificarme</button>
+    <label for="worker">Operario</label>
+    <input id="worker" type="text" readonly placeholder="Introduce tu PIN para ver tu nombre" aria-live="polite">
 
     <div class="actions">
-      <button id="btnIn" class="in">FICHAR ENTRADA</button>
-      <button id="btnOut" class="out">FICHAR SALIDA</button>
+      <button id="btnIn" class="in" disabled>FICHAR ENTRADA</button>
+      <button id="btnOut" class="out" disabled>FICHAR SALIDA</button>
     </div>
     <div id="msg" class="msg" aria-live="polite"></div>
   </section>
 
   <section class="card">
     <div class="big">Mis fichajes de hoy</div>
-    <div id="records" class="small muted" style="margin-top:8px">Pulsa “Actualizar” para consultar el servidor.</div>
+    <div id="records" class="small muted" style="margin-top:8px">Introduce tu PIN para consultar tus fichajes.</div>
     <button id="refresh" class="secondary">Actualizar</button>
   </section>
 
@@ -72,70 +73,125 @@ button:disabled{opacity:.55;cursor:not-allowed}
 <script>
 (() => {
   const $=id=>document.getElementById(id);
-  const savedUrl=localStorage.getItem('diego1_api_url')||'';
-  $('worker').value=localStorage.getItem('diego1_worker')||'';
-  $('apiUrl').value=savedUrl;
-  if(!savedUrl) $('setupCard').classList.remove('hidden');
-
+  let worker='', validatedPin='', revision=0, timer, busy=false, identifying=false;
+  $('apiUrl').value=localStorage.getItem('diego1_api_url')||'';
+  localStorage.removeItem('diego1_worker');
+  if(!$('apiUrl').value) $('setupCard').classList.remove('hidden');
   function tick(){
     const d=new Date();
     $('date').textContent=d.toLocaleDateString('es-ES',{weekday:'long',day:'2-digit',month:'long',year:'numeric'});
     $('clock').textContent=d.toLocaleTimeString('es-ES',{hour:'2-digit',minute:'2-digit',second:'2-digit'});
   }
   tick(); setInterval(tick,1000);
-
-  $('saveApi').addEventListener('click',()=>{
-    const u=$('apiUrl').value.trim();
-    if(!/^https:\/\/script\.google\.com\//.test(u)){show('La URL no parece válida.','err');return}
-    localStorage.setItem('diego1_api_url',u);
-    $('setupCard').classList.add('hidden');
-    show('Servidor guardado correctamente.','ok');
-  });
-
+  function show(t,c=''){ $('msg').textContent=t; $('msg').className='msg '+c; }
+  function controls(){
+    const ready=worker && validatedPin===$('pin').value.trim();
+    $('btnIn').disabled=busy||identifying||!ready;
+    $('btnOut').disabled=busy||identifying||!ready;
+    $('refresh').disabled=busy||identifying||!ready;
+    $('identify').disabled=busy||identifying||!$('pin').value.trim();
+    $('pin').disabled=busy;
+  }
+  function resetIdentity(){
+    revision++; worker=''; validatedPin=''; identifying=false;
+    $('worker').value=''; $('status').textContent='Sin identificar';
+    $('records').textContent='Introduce tu PIN para consultar tus fichajes.';
+    controls();
+  }
+  function current(id){return id.revision===revision && id.pin===$('pin').value.trim();}
   async function callApi(payload){
     const url=localStorage.getItem('diego1_api_url');
-    if(!url){$('setupCard').classList.remove('hidden');throw new Error('Falta configurar la URL del servidor.')}
-    const body=new URLSearchParams(payload);
-    const r=await fetch(url,{method:'POST',body});
-    const data=await r.json();
-    if(!data.ok) throw new Error(data.error||'Error del servidor');
-    if(payload.worker){localStorage.setItem('diego1_worker',payload.worker);$('worker').value=payload.worker;}
-    return data;
+    if(!url){$('setupCard').classList.remove('hidden');throw new Error('Falta configurar la URL del servidor.');}
+    const controller=new AbortController();
+    const timeout=setTimeout(()=>controller.abort(),20000);
+    try {
+      const r=await fetch(url,{method:'POST',body:new URLSearchParams(payload),signal:controller.signal});
+      if(!r.ok) throw new Error('No se pudo conectar con el servidor.');
+      let data;
+      try {data=await r.json();} catch(e){throw new Error('El servidor no ha devuelto una respuesta válida.');}
+      if(!data.ok) throw new Error(data.error||'Error del servidor');
+      return data;
+    } catch(e){
+      if(e.name==='AbortError') throw new Error('El servidor tarda demasiado. Vuelve a intentarlo.');
+      throw e;
+    } finally {clearTimeout(timeout);}
   }
+  async function loadToday(id){
+    const d=await callApi({action:'today',pin:id.pin,worker:id.worker});
+    if(!current(id)) return;
+    $('status').textContent=d.open?'Jornada abierta':'Fuera de jornada';
+    $('records').replaceChildren();
+    if(!d.records.length){$('records').textContent='Sin fichajes hoy.';return;}
+    d.records.forEach(x=>{
+      const row=document.createElement('div'); row.className='row';
+      const type=document.createElement('span');type.textContent=x.type;
+      const time=document.createElement('strong');time.textContent=x.time;
+      row.append(type,time);$('records').append(row);
+    });
+  }
+  async function identify(){
+    clearTimeout(timer);
+    const pin=$('pin').value.trim();
+    if(!pin){resetIdentity();show('Introduce tu PIN personal.','err');return;}
+    resetIdentity();
+    const id={pin,revision}; identifying=true;controls();show('Validando PIN…');
+    try {
+      const d=await callApi({action:'identify',pin});
+      if(!current(id)) return;
+      if(typeof d.worker!=='string'||!d.worker.trim()) throw new Error('El servidor necesita la nueva versión de identificación por PIN.');
+      worker=d.worker.trim();validatedPin=pin;id.worker=worker;
+      $('worker').value=worker;show('Identificado correctamente.','ok');
+      await loadToday(id);
+    } catch(e){if(current(id)) show(e.message,'err');}
+    finally {if(current(id)){identifying=false;controls();}}
+  }
+  $('pin').addEventListener('input',()=>{
+    clearTimeout(timer);resetIdentity();show('');
+    if($('pin').value.trim().length>=4) timer=setTimeout(identify,650);
+  });
+  $('pin').addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();identify();}});
+  $('pin').addEventListener('change',()=>{if(!worker && !identifying && $('pin').value.trim()) identify();});
+  $('identify').addEventListener('click',identify);
+  $('saveApi').addEventListener('click',()=>{
+    const u=$('apiUrl').value.trim();
+    if(!/^https:\/\/script\.google\.com\//.test(u)){show('La URL no parece válida.','err');return;}
+    localStorage.setItem('diego1_api_url',u);resetIdentity();
+    $('setupCard').classList.add('hidden');
+    if($('pin').value.trim()) identify(); else show('Servidor guardado correctamente.','ok');
+  });
   function identity(){
-    const typedWorker=$('worker').value.trim(), pin=$('pin').value.trim();
-    const worker=typedWorker;
-    if(!worker) throw new Error('Introduce tu nombre y apellidos.');
-    if(!pin) throw new Error('Introduce tu PIN.');
-    return {worker,pin};
+    if(!worker || validatedPin!==$('pin').value.trim()) throw new Error('Introduce y valida tu PIN antes de fichar.');
+    return {worker,pin:validatedPin,revision};
   }
-  function show(t,c=''){ $('msg').textContent=t; $('msg').className='msg '+c; }
-  function lock(v){ $('btnIn').disabled=v; $('btnOut').disabled=v; $('refresh').disabled=v; }
-
   async function punch(type){
-    try{
-      lock(true); show('Registrando...');
-      const id=identity();
-      const d=await callApi({action:'punch',type,...id});
-      show(d.message||'Fichaje registrado.','ok');
-      await refresh();
-    }catch(e){show(e.message,'err')}finally{lock(false)}
-  }
-  async function refresh(){
-    try{
-      const id=identity();
-      const d=await callApi({action:'today',...id});
-      $('status').textContent=d.open?'Jornada abierta':'Fuera de jornada';
-      if(!d.records.length){$('records').innerHTML='<div class="muted">Sin fichajes hoy.</div>';return}
-      $('records').innerHTML=d.records.map(x=>`<div class="row"><span>${x.type}</span><strong>${x.time}</strong></div>`).join('');
-    }catch(e){show(e.message,'err')}
+    if(busy||identifying) return;
+    let id;
+    try {
+      id=identity();busy=true;controls();show('Registrando…');
+      const d=await callApi({action:'punch',type,worker:id.worker,pin:id.pin});
+      if(!current(id)) return;
+      show(d.message||'Fichaje registrado.','ok');await loadToday(id);
+    } catch(e){if(!id||current(id)) show(e.message,'err');}
+    finally {busy=false;controls();}
   }
   $('btnIn').addEventListener('click',()=>punch('ENTRADA'));
   $('btnOut').addEventListener('click',()=>punch('SALIDA'));
-  $('refresh').addEventListener('click',refresh);
-
-  if('serviceWorker' in navigator) navigator.serviceWorker.register('./service-worker.js').catch(()=>{});
+  $('refresh').addEventListener('click',async()=>{
+    if(busy||identifying) return;
+    let id;
+    try {id=identity();busy=true;controls();await loadToday(id);}
+    catch(e){if(!id||current(id)) show(e.message,'err');}
+    finally {busy=false;controls();}
+  });
+  controls();
+  if('serviceWorker' in navigator){
+    let reloading=false;
+    navigator.serviceWorker.addEventListener('controllerchange',()=>{if(!reloading){reloading=true;location.reload();}});
+    navigator.serviceWorker.register('./service-worker.js').then(r=>r.update()).catch(()=>{});
+  }
 })();
+
 </script>
 </body>
 </html>
+
