@@ -116,8 +116,21 @@ button:disabled{opacity:.55;cursor:not-allowed}
       throw e;
     } finally {clearTimeout(timeout);}
   }
+  function lockError(e){
+    return /bloqueo|lock|timed out waiting for lock|tiempo de espera/i.test(e.message||'');
+  }
+  function pause(ms){return new Promise(resolve=>setTimeout(resolve,ms));}
+  async function readApi(payload){
+    for(let attempt=0;attempt<3;attempt++){
+      try{return await callApi(payload);}
+      catch(e){
+        if(!lockError(e)||attempt===2) throw e;
+        await pause(600*(attempt+1));
+      }
+    }
+  }
   async function loadToday(id){
-    const d=await callApi({action:'today',pin:id.pin,worker:id.worker});
+    const d=await readApi({action:'today',pin:id.pin,worker:id.worker});
     if(!current(id)) return;
     $('status').textContent=d.open?'Jornada abierta':'Fuera de jornada';
     $('records').replaceChildren();
@@ -136,7 +149,7 @@ button:disabled{opacity:.55;cursor:not-allowed}
     resetIdentity();
     const id={pin,revision}; identifying=true;controls();show('Validando PIN…');
     try {
-      const d=await callApi({action:'identify',pin});
+      const d=await readApi({action:'identify',pin});
       if(!current(id)) return;
       if(typeof d.worker!=='string'||!d.worker.trim()) throw new Error('El servidor necesita la nueva versión de identificación por PIN.');
       worker=d.worker.trim();validatedPin=pin;id.worker=worker;
@@ -171,7 +184,19 @@ button:disabled{opacity:.55;cursor:not-allowed}
       const d=await callApi({action:'punch',type,worker:id.worker,pin:id.pin});
       if(!current(id)) return;
       show(d.message||'Fichaje registrado.','ok');await loadToday(id);
-    } catch(e){if(!id||current(id)) show(e.message,'err');}
+    } catch(e){
+      if(!id||!current(id)) return;
+      if(lockError(e)){
+        show('El servidor está ocupado. Comprobando si se registró el fichaje…','err');
+        try {
+          await pause(750);
+          await loadToday(id);
+          show('Consulta actualizada. Revisa si aparece el fichaje antes de volver a pulsar.','err');
+        } catch(checkError){
+          show('Servidor ocupado. No se ha podido confirmar el fichaje. Pulsa Actualizar antes de repetirlo.','err');
+        }
+      } else show(e.message,'err');
+    }
     finally {busy=false;controls();}
   }
   $('btnIn').addEventListener('click',()=>punch('ENTRADA'));
